@@ -139,7 +139,7 @@ fn main() -> ! {
     // Optocoupled outputs.
     let mut motor_enable_out = gpiob.pb10.into_push_pull_output();
     let mut motor_dir_out = gpiob.pb1.into_push_pull_output();
-    let mut motor_step_out = gpiob.pb0.into_push_pull_output().erase_number();
+    let mut motor_step_out = gpiob.pb0.into_push_pull_output();
 
     // Display I/O.
     let mut disp_rs = gpiob.pb3.into_push_pull_output().speed(Speed::Medium);
@@ -175,7 +175,7 @@ fn main() -> ! {
     motor_dir_out.set_low();
     motor_enable_out.set_low();
     motor_step_out.set_low();
-    let mut pulser = Pulser::new(&mut motor_step_out);
+    let mut pulser = Pulser::new(dp.TIM1, motor_step_out, &clocks);
     let mut cold: bool = true;
     let mut last_ms: i64 = 0;
     let mut now_ms: i64 = 0;
