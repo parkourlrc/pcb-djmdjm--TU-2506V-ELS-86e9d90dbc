@@ -7,7 +7,7 @@ pub struct FirFilter<const N: usize> {
 
 impl<const N: usize> FirFilter<N> {
     pub const fn new() -> FirFilter<N> {
-        FirFilter{
+        FirFilter {
             ring_fifo: [0; N],
             offset: 0,
             sum: 0,

@@ -33,11 +33,7 @@ impl Control {
             last_direction: Direction::Forward,
         }
     }
-    pub fn feed_per_rev(
-        &mut self,
-        encoder_pulses: i32,
-        _elapsed_ms: u32,
-    ) -> (Direction, u32) {
+    pub fn feed_per_rev(&mut self, encoder_pulses: i32, _elapsed_ms: u32) -> (Direction, u32) {
         let mut t: i64 = encoder_pulses as i64 * self.feed_per_rev_factor;
         t += self.fractional_pulses_remaining;
         // Retain remainder for next round.
@@ -86,7 +82,7 @@ impl Control {
     }
     pub fn set_feed_rate_tpi(&mut self, tpi: i32) {
         // XXX bounds checking.
-        self.feed_rate_micron_per_rev = 2540/tpi; // Approximation only.
+        self.feed_rate_micron_per_rev = 2540 / tpi; // Approximation only.
         self.fractional_pulses_remaining = 0;
         // XXX consider fixed point split; is 32.32 ideal?
         // Precalculate multiplication factor.
