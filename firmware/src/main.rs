@@ -8,6 +8,7 @@ use stm32f4xx_hal as hal;
 mod lcd;
 use lcd::*;
 mod control;
+use control::JogController;
 mod fir;
 mod userinterface;
 use userinterface::Mode;
@@ -40,6 +41,7 @@ const MOTOR_PPR: i64 = 3200;
 
 const UI_ENCODER_PULSE_PER_DETENT: u32 = 2;
 const DISPLAY_UPDATE_RATE: u32 = 10; // Hz
+const SPINDLE_STOPPED_RPM_THRESHOLD: u32 = 3;
 
 const RPM_SMOOTH_UPDATE_RATE: u32 = 50; // Hz
 const RPM_SMOOTH_DISPLAY_RATE: u32 = DISPLAY_UPDATE_RATE; // Hz
@@ -186,6 +188,7 @@ fn main() -> ! {
     let mut smoothed_rpm: i32 = 0;
     let mut ui = userinterface::UI::new(&mut display);
     let mut control = control::Control::new();
+    let mut jog = JogController::new();
     let mut last_motor_dir: bool = false;
     let mut last_motor_enable: bool = false;
     let mut motor_pulses_since_last_ui: u32 = 0;
@@ -233,22 +236,44 @@ fn main() -> ! {
                 motor_pulses_since_last_ui,
                 last_motor_enable,
                 last_motor_dir,
+                jog.is_active(),
+                jog.remaining_microns(),
             );
             next_ui_ms = now_ms + (1000 / DISPLAY_UPDATE_RATE as i64);
             motor_pulses_since_last_ui = 0;
         }
+
+        let jog_page = ui.is_jog_page() && ui.get_mode() == Mode::ServoOff;
+        if !jog_page || !servo_ok {
+            jog.cancel();
+        }
+        if let Some(distance_microns) = ui.take_jog_request() {
+            if jog_page && servo_ok && smoothed_rpm.unsigned_abs() <= SPINDLE_STOPPED_RPM_THRESHOLD
+            {
+                jog.start(distance_microns, now_ms);
+            }
+        }
+
         // Call controller for current mode to determine motor commands.
         let mut motor_enable: bool = false;
         let mut motor_dir: bool = false;
         let mut motor_pulses: u32 = 0;
-        match ui.get_mode() {
-            Mode::ServoOff => (),
-            Mode::Feed | Mode::ThreadMetric | Mode::ThreadImperial => {
-                // Prepare to command drive based on spindle motion and/or time.
-                let (direction, pulses) = control.feed_per_rev(spindle_enc_delta, ms_elapsed);
-                motor_dir = direction.into();
-                motor_pulses = pulses;
-                motor_enable = true;
+        if jog_page {
+            motor_enable = servo_ok;
+            if jog.is_active() {
+                motor_dir = jog.direction().into();
+                motor_pulses = jog.pulses_due(now_ms);
+            }
+        } else {
+            match ui.get_mode() {
+                Mode::ServoOff => (),
+                Mode::Feed | Mode::ThreadMetric | Mode::ThreadImperial => {
+                    // Prepare to command drive based on spindle motion and/or time.
+                    let (direction, pulses) = control.feed_per_rev(spindle_enc_delta, ms_elapsed);
+                    motor_dir = direction.into();
+                    motor_pulses = pulses;
+                    motor_enable = true;
+                }
             }
         }
         // Changes in enable and direction require at least 1μs to

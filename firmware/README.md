@@ -42,10 +42,19 @@ and runs the leadscrew to advance at a configured rate (in mm) per spindle
 revolution. Two threading modes are available: `Thread`, which performs metric
 (mm/rev) threading and `Thread Im` which does imperial (TPI) threading.
 
-The debug mode can be accessed by pressing the mode encoder's button for a
-couple of seconds. This mode has a number of pages, accessible via the mode
-wheel, that show various internal debugging parameters. Debug mode can be
-exited by holding down the mode button again.
+The debug mode can be accessed by holding both encoder buttons for a second.
+This mode has a number of pages, accessible via the mode wheel, that show
+various internal debugging parameters. Debug mode can be exited by holding
+both encoder buttons again.
+
+The debug jog page moves the leadscrew by a signed distance selected with the
+feed encoder. Pressing the feed encoder button starts the move. Jogging requires
+the controller to be in `Servo off`, the servo to be healthy and the spindle
+speed to be within 3 RPM of stopped. The servo is enabled while this page is
+active so that it holds position between moves. Moves run at 0.5mm/s and cannot
+be manually cancelled with the feed button once started. A servo fault or
+leaving the jog page cancels the move; spindle encoder input is ignored after
+the move starts.
 
 ## Notes
 

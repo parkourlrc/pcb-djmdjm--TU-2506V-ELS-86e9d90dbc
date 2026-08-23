@@ -35,11 +35,12 @@ enum DebugPage {
     Spindle,
     Control,
     Time,
+    Jog,
 }
 
 impl DebugPage {
     pub fn add(&self, n: i16) -> DebugPage {
-        match ((*self as i16) + n).clamp(0, 6) {
+        match ((*self as i16) + n).clamp(0, 7) {
             0 => DebugPage::Help,
             1 => DebugPage::Status,
             2 => DebugPage::UIControls,
@@ -47,6 +48,7 @@ impl DebugPage {
             4 => DebugPage::Spindle,
             5 => DebugPage::Control,
             6 => DebugPage::Time,
+            7 => DebugPage::Jog,
             _ => panic!(),
         }
     }
@@ -63,11 +65,14 @@ pub struct UI<'a, DISPLAY> {
     message_timeout: i64,
     mode_enc_pos_last: i16,
     feed_enc_pos_last: i16,
+    feed_enc_button_last: bool,
     feed_rate_index: usize,
     metric_thread_pitch_index: usize,
     imperial_thread_pitch_index: usize,
     debug_hold: i64,
     spindle_enc_last: i32,
+    jog_distance_index: usize,
+    jog_request: Option<i32>,
     cold: bool,
 }
 
@@ -90,6 +95,9 @@ where
         80, 72, 64, 56, 48, 40, 32, 28, 24, 20, 18, 16, 14, 13, 12, 11, 10, 9, 8, 7, 6,
     ];
     const DEFAULT_IMPERIAL_THREAD_PITCH: usize = 9;
+    const JOG_DISTANCES_MICRONS: [i32; 10] =
+        [-10_000, -1_000, -100, -10, -1, 1, 10, 100, 1_000, 10_000];
+    const DEFAULT_JOG_DISTANCE_INDEX: usize = 5;
     pub fn new(display: &'a mut DISPLAY) -> UI<'a, DISPLAY> {
         UI {
             display,
@@ -102,11 +110,14 @@ where
             message_timeout: -1,
             mode_enc_pos_last: 0,
             feed_enc_pos_last: 0,
+            feed_enc_button_last: false,
             feed_rate_index: Self::DEFAULT_FEED_RATE_INDEX,
             metric_thread_pitch_index: Self::DEFAULT_METRIC_THREAD_PITCH,
             imperial_thread_pitch_index: Self::DEFAULT_IMPERIAL_THREAD_PITCH,
             debug_hold: 0,
             spindle_enc_last: 0,
+            jog_distance_index: Self::DEFAULT_JOG_DISTANCE_INDEX,
+            jog_request: None,
             cold: true,
         }
     }
@@ -126,11 +137,14 @@ where
         motor_pulses: u32,
         motor_enable: bool,
         motor_direction: bool,
+        jog_active: bool,
+        jog_remaining_microns: i32,
     ) {
         if self.cold {
             self.last_update_ms = now_ms;
             self.mode_enc_pos_last = mode_enc_pos;
             self.feed_enc_pos_last = feed_enc_pos;
+            self.feed_enc_button_last = feed_enc_button;
             control.set_feed_rate_micron_per_rev(Self::FEED_RATES[self.feed_rate_index]);
             self.message1 = "TU-2506V-ELS";
             self.message2 = "djm 20241117";
@@ -141,9 +155,11 @@ where
             (mode_enc_pos - self.mode_enc_pos_last) / crate::UI_ENCODER_PULSE_PER_DETENT as i16;
         let feed_enc_pulses: i16 =
             (feed_enc_pos - self.feed_enc_pos_last) / crate::UI_ENCODER_PULSE_PER_DETENT as i16;
+        let feed_enc_button_pressed = feed_enc_button && !self.feed_enc_button_last;
         self.mode_enc_pos_last = mode_enc_pos;
         self.feed_enc_pos_last = feed_enc_pos;
-        let spindle_moving = rpm > 3;
+        self.feed_enc_button_last = feed_enc_button;
+        let spindle_moving = rpm.unsigned_abs() > crate::SPINDLE_STOPPED_RPM_THRESHOLD;
 
         let mut status: &str = "OK";
         if self.mode == Mode::ServoOff {
@@ -229,6 +245,19 @@ where
             }
         }
 
+        if self.debug_mode
+            && self.debug_page == DebugPage::Jog
+            && self.debug_hold == 0
+            && !jog_active
+        {
+            self.jog_distance_index = (self.jog_distance_index as isize + feed_enc_pulses as isize)
+                .clamp(0, Self::JOG_DISTANCES_MICRONS.len() as isize - 1)
+                as usize;
+            if feed_enc_button_pressed {
+                self.jog_request = Some(Self::JOG_DISTANCES_MICRONS[self.jog_distance_index]);
+            }
+        }
+
         // Update display.
         if self.debug_mode {
             self.display_debug(
@@ -246,6 +275,8 @@ where
                 motor_enable,
                 motor_direction,
                 servo_ok,
+                jog_active,
+                jog_remaining_microns,
             );
             self.spindle_enc_last = spindle_enc_pos;
         } else {
@@ -260,6 +291,14 @@ where
     }
     pub fn get_mode(&self) -> Mode {
         self.mode
+    }
+
+    pub fn is_jog_page(&self) -> bool {
+        self.debug_mode && self.debug_page == DebugPage::Jog
+    }
+
+    pub fn take_jog_request(&mut self) -> Option<i32> {
+        self.jog_request.take()
     }
 
     // Update feed mode parameters based on user input.
@@ -347,6 +386,8 @@ where
         motor_enable: bool,
         motor_direction: bool,
         servo_ok: bool,
+        jog_active: bool,
+        jog_remaining_microns: i32,
     ) {
         match self.debug_page {
             DebugPage::Help => {
@@ -419,6 +460,26 @@ where
                     now_ms - self.last_update_ms,
                 )
                 .ok();
+            }
+            DebugPage::Jog => {
+                let distance = Self::JOG_DISTANCES_MICRONS[self.jog_distance_index];
+                write!(self.display.at(0, 0), "Jog {:+7} um  ", distance).ok();
+                if jog_active {
+                    write!(
+                        self.display.at(0, 1),
+                        "RUN {:+7} um  ",
+                        jog_remaining_microns
+                    )
+                    .ok();
+                } else if !servo_ok {
+                    write!(self.display.at(0, 1), "{:<16}", "SERVO ERROR").ok();
+                } else if self.mode != Mode::ServoOff {
+                    write!(self.display.at(0, 1), "{:<16}", "SET SERVO OFF").ok();
+                } else if rpm.unsigned_abs() > crate::SPINDLE_STOPPED_RPM_THRESHOLD {
+                    write!(self.display.at(0, 1), "{:<16}", "STOP SPINDLE").ok();
+                } else {
+                    write!(self.display.at(0, 1), "{:<16}", "PRESS FEED KNOB").ok();
+                }
             }
         }
     }

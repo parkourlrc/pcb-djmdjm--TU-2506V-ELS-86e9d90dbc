@@ -1,9 +1,123 @@
 //! Encoder/Servo control
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum Direction {
     Forward,
     Backwards,
+}
+
+const JOG_SPEED_MICRONS_PER_SECOND: i64 = 500;
+const JOG_TICK_HZ: i64 = 1000;
+
+pub struct JogController {
+    active: bool,
+    direction: Direction,
+    remaining_pulses: u32,
+    conversion_remainder: i64,
+    pending_conversion_remainder: i64,
+    rate_remainder: i64,
+    last_tick_ms: i64,
+}
+
+impl JogController {
+    const PULSE_NUMERATOR: i64 = crate::MOTOR_PPR.abs() * crate::DRIVE_RATIO_LEADSCREW.abs();
+    const PULSE_DENOMINATOR: i64 = crate::LEADSCREW_PITCH.abs() * crate::DRIVE_RATIO_MOTOR.abs();
+    const RATE_NUMERATOR: i64 = JOG_SPEED_MICRONS_PER_SECOND * Self::PULSE_NUMERATOR;
+    const RATE_DENOMINATOR: i64 = JOG_TICK_HZ * Self::PULSE_DENOMINATOR;
+
+    pub fn new() -> Self {
+        Self {
+            active: false,
+            direction: Direction::Forward,
+            remaining_pulses: 0,
+            conversion_remainder: 0,
+            pending_conversion_remainder: 0,
+            rate_remainder: 0,
+            last_tick_ms: 0,
+        }
+    }
+
+    pub fn start(&mut self, distance_microns: i32, now_ms: i64) -> bool {
+        if self.active || distance_microns == 0 {
+            return false;
+        }
+
+        let scaled = distance_microns as i64 * Self::PULSE_NUMERATOR + self.conversion_remainder;
+        let rounding = Self::PULSE_DENOMINATOR / 2;
+        let signed_pulses = if scaled >= 0 {
+            (scaled + rounding) / Self::PULSE_DENOMINATOR
+        } else {
+            (scaled - rounding) / Self::PULSE_DENOMINATOR
+        };
+        if signed_pulses == 0 {
+            return false;
+        }
+
+        self.direction = if signed_pulses > 0 {
+            Direction::Forward
+        } else {
+            Direction::Backwards
+        };
+        self.remaining_pulses = signed_pulses.unsigned_abs() as u32;
+        self.pending_conversion_remainder = scaled - signed_pulses * Self::PULSE_DENOMINATOR;
+        self.rate_remainder = 0;
+        self.last_tick_ms = now_ms;
+        self.active = true;
+        true
+    }
+
+    pub fn cancel(&mut self) {
+        if self.active {
+            self.active = false;
+            self.remaining_pulses = 0;
+            self.conversion_remainder = 0;
+            self.pending_conversion_remainder = 0;
+            self.rate_remainder = 0;
+        }
+    }
+
+    pub fn pulses_due(&mut self, now_ms: i64) -> u32 {
+        if !self.active || now_ms <= self.last_tick_ms {
+            return 0;
+        }
+
+        // Process one quantum and discard missed time. Catching up after a
+        // delayed loop would produce an unintended high-speed burst.
+        self.last_tick_ms = now_ms;
+        self.rate_remainder += Self::RATE_NUMERATOR;
+        let pulses = (self.rate_remainder / Self::RATE_DENOMINATOR) as u32;
+        self.rate_remainder %= Self::RATE_DENOMINATOR;
+        let pulses = pulses.min(self.remaining_pulses);
+        self.remaining_pulses -= pulses;
+
+        if self.remaining_pulses == 0 {
+            self.active = false;
+            self.conversion_remainder = self.pending_conversion_remainder;
+        }
+        pulses
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    pub fn direction(&self) -> Direction {
+        self.direction
+    }
+
+    pub fn remaining_microns(&self) -> i32 {
+        if !self.active {
+            return 0;
+        }
+
+        let distance = (self.remaining_pulses as i64 * Self::PULSE_DENOMINATOR
+            + Self::PULSE_NUMERATOR / 2)
+            / Self::PULSE_NUMERATOR;
+        match self.direction {
+            Direction::Forward => distance as i32,
+            Direction::Backwards => -(distance as i32),
+        }
+    }
 }
 
 impl From<Direction> for bool {
